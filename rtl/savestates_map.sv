@@ -1,5 +1,5 @@
-// Save state memory map - routes SA1 save state traffic
-// Ported from MiSTer-devel/SNES_MiSTer
+// Save state SA1 stub — SA1 chip save state not yet supported.
+// Ports match what savestates.sv expects; all outputs are driven low.
 module savestates_map
 (
 	input             reset_n,
@@ -40,52 +40,12 @@ module savestates_map
 
 	output      [7:0] ss_do,
 	output            ss_oe
-
 );
 
-wire  [7:0] sa1_ss_do;
-wire        sa1_ss_oe;
-wire [15:0] sa1_rom_addr;
-wire        sa1_rom_ovr;
-
-savestates_sa1 ss_map_sa1
-(
-	.reset_n(reset_n),
-	.clk(clk),
-
-	.active(sa1_active),
-
-	.ss_busy(ss_busy),
-	.save_en(save_en),
-
-	.ss_reg_sel(ss_reg_sel),
-
-	.ca(ca),
-	.cpurd_n(cpurd_n),
-	.cpuwr_n(cpuwr_n),
-
-	.di(di),
-
-	.sa1_a(sa1_a),
-	.sa1_rd_n(sa1_rd_n),
-	.sa1_wr_n(sa1_wr_n),
-	.sa1_di(sa1_di),
-
-	.sa1_romsel(sa1_sa1_romsel),
-	.sns_romsel(sa1_sns_romsel),
-
-	.rom_addr(sa1_rom_addr),
-	.rom_ovr(sa1_rom_ovr),
-
-	.ss_do(sa1_ss_do),
-	.ss_oe(sa1_ss_oe)
-);
-
-assign ss_do = (sa1_ss_do);
-assign ss_oe = (sa1_ss_oe);
-
-assign rom_addr = (sa1_rom_addr);
-assign rom_ovr = (sa1_rom_ovr);
-assign map_active = (sa1_active);
+assign map_active = 1'b0;
+assign rom_addr   = 16'h0;
+assign rom_ovr    = 1'b0;
+assign ss_do      = 8'h0;
+assign ss_oe      = 1'b0;
 
 endmodule

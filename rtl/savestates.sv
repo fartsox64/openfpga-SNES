@@ -163,23 +163,8 @@ localparam DDR_IDLE = 4'd0, LOAD_DATA = 4'd1, WRITE_DATA = 4'd2,
 			WRITE_CNTSIZE = 4'd3, READ_HEAD = 4'd4,	READ_HEAD_END = 4'd5,
 			DDR_END = 4'd6;
 
-reg [31:0] ss_count = 0;
-
-// Detect if NMI is being used. Some games do not use NMI during game play.
-reg [15:0] nmi_cycle_cnt, nmi_read_sr;
-wire ss_use_nmi = |nmi_read_sr;
-always @(posedge clk) begin
-	if (~reset_n) begin
-		nmi_cycle_cnt <= 0;
-		nmi_read_sr   <= 0;
-	end else if (sysclkf_ce) begin
-		nmi_cycle_cnt <= nmi_cycle_cnt + 1'b1;
-		if (&nmi_cycle_cnt | (~cpurd_n & nmi_vect_l)) begin
-			nmi_read_sr <= { nmi_read_sr[14:0], nmi_vect_l };
-			nmi_cycle_cnt <= 0;
-		end
-	end
-end
+// Always prefer NMI vector for triggering save state
+wire ss_use_nmi = 1'b1;
 
 
 always @(posedge clk) begin
@@ -212,9 +197,6 @@ always @(posedge clk) begin
 			if (nmi_vect_l | (~ss_use_nmi & irq_vect_l)) begin // Prefer to use NMI
 				if (~ss_busy & (save_en | (load_en & load_ready))) begin
 					ss_busy <= 1; // Override NMI/IRQ vector
-					if (save_en) begin
-						ss_count <= ss_count + 1'b1;
-					end
 				end
 			end
 
@@ -318,13 +300,10 @@ always @(posedge clk) begin
 					ddr_state <= save_end ? WRITE_CNTSIZE : DDR_END;
 				end
 				WRITE_CNTSIZE: begin
-					ddr_do <= {14'd0, ss_data_size[19:2], ss_count[31:0]};
+					ddr_do <= {14'd0, ss_data_size[19:2], 32'd0};
 					ss_ddr_addr <= 20'd0;
 					ddr_we <= 1;
 					ddr_req <= ~ddr_req;
-					if (~save_sd) begin
-						ddr_be <= 8'hF0; // Skip count write
-					end
 					ddr_state <= DDR_END;
 				end
 				READ_HEAD: begin

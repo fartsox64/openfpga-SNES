@@ -109,12 +109,12 @@ module save_state_controller (
       .aclr    (fifo_load_clr)
   );
   defparam fifo_load.intended_device_family = "Cyclone V",
-           fifo_load.lpm_numwords           = 4096,
+           fifo_load.lpm_numwords           = 256,
            fifo_load.lpm_showahead          = "OFF",
            fifo_load.lpm_type               = "dcfifo_mixed_widths",
            fifo_load.lpm_width              = 32,
-           fifo_load.lpm_widthu             = 12,
-           fifo_load.lpm_widthu_r           = 11,
+           fifo_load.lpm_widthu             = 8,
+           fifo_load.lpm_widthu_r           = 7,
            fifo_load.lpm_width_r            = 64,
            fifo_load.overflow_checking      = "OFF",
            fifo_load.rdsync_delaypipe       = 5,
@@ -167,7 +167,6 @@ module save_state_controller (
   reg  prev_bridge_rd;
 
   wire [27:0] bridge_save_addr = bridge_addr[27:0];
-  wire        bridge_save_rd   = bridge_rd && bridge_addr[31:28] == 4'h4;
 
   localparam NONE          = 0;
   localparam SAVE_READ_REQ = 1;
