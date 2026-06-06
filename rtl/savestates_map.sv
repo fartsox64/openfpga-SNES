@@ -48,7 +48,7 @@ wire [15:0] sa1_rom_addr;
 wire sa1_rom_ovr;
 wire sa1_map_active;
 
-savestates_sa1 sa1
+savestates_sa1 ss_sa1
 (
 	.reset_n(reset_n),
 	.clk(clk),
