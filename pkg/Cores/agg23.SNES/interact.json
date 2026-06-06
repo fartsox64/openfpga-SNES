@@ -44,68 +44,6 @@
         "value": 1
       },
       {
-        "name": "Controller Options",
-        "id": 30,
-        "type": "list",
-        "enabled": true,
-        "address": "0x104",
-        "persist": true,
-        "writeonly": true,
-        "defaultval": 0,
-        "options": [
-          {
-            "name": "Gamepad",
-            "value": 0
-          },
-          {
-            "name": "Super Scope",
-            "value": 1
-          },
-          {
-            "name": "Justifier",
-            "value": 3
-          },
-          {
-            "name": "Mouse",
-            "value": 4
-          }
-        ]
-      },
-      {
-        "name": "D-Pad Aim Speed",
-        "id": 34,
-        "type": "slider_u32",
-        "enabled": true,
-        "address": "0x108",
-        "persist": true,
-        "writeonly": true,
-        "defaultval": 3,
-        "graphical": {
-          "signed": false,
-          "min": 1,
-          "max": 10,
-          "adjust_small": 1,
-          "adjust_large": 4
-        }
-      },
-      {
-        "name": "Joy Deadzone",
-        "id": 35,
-        "type": "slider_u32",
-        "enabled": true,
-        "address": "0x0000010C",
-        "persist": true,
-        "writeonly": true,
-        "defaultval": 0,
-        "graphical": {
-          "signed": false,
-          "min": 0,
-          "max": 64,
-          "adjust_small": 1,
-          "adjust_large": 10
-        }
-      },
-      {
         "name": "Square Pixels",
         "id": 42,
         "type": "check",

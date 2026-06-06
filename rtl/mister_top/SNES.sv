@@ -11,11 +11,6 @@ module MAIN_SNES (
     input wire gsu_turbo_enabled,
 
     input wire multitap_enabled,
-    input wire lightgun_enabled,
-    input wire lightgun_type,
-    input wire [7:0] dpad_aim_speed,
-    input wire mouse_enabled,
-
     input wire blend_enabled,
 
     // Inputs
@@ -31,9 +26,6 @@ module MAIN_SNES (
     input wire p1_dpad_down,
     input wire p1_dpad_left,
     input wire p1_dpad_right,
-
-    input wire [7:0] p1_lstick_x,
-    input wire [7:0] p1_lstick_y,
 
     input wire p2_button_a,
     input wire p2_button_b,
@@ -190,9 +182,6 @@ module MAIN_SNES (
   // Hardcoded wires
   wire [63:0] status = 0;
   wire [5:0] ioctl_index = 0;  // TODO
-  wire GUN_BTN = status[27];
-  wire [1:0] GUN_MODE = lightgun_enabled ? 2'd1 : 0;
-  wire [1:0] mouse_mode = status[6:5];
   wire joy_swap = status[7] | piano;
 
   wire [6:0] USER_IN = 0;
@@ -409,7 +398,7 @@ module MAIN_SNES (
       .VSYNC  (vsync),
 
       .JOY1_DI(JOY1_DI),
-      .JOY2_DI(GUN_MODE ? LG_DO : JOY2_DI),
+      .JOY2_DI(JOY2_DI),
       .JOY_STRB(JOY_STRB),
       .JOY1_CLK(JOY1_CLK),
       .JOY2_CLK(JOY2_CLK),
@@ -490,9 +479,9 @@ module MAIN_SNES (
   end
 
   always @(posedge clk_sys) begin
-    video_r <= (LG_TARGET && lightgun_enabled) ? {8{LG_TARGET[0]}} : R;
-    video_g <= (LG_TARGET && lightgun_enabled) ? {8{LG_TARGET[1]}} : G;
-    video_b <= (LG_TARGET && lightgun_enabled) ? {8{LG_TARGET[2]}} : B;
+    video_r <= R;
+    video_g <= G;
+    video_b <= B;
   end
 
   ////////////////////////////  MEMORY  ///////////////////////////////////
@@ -825,11 +814,11 @@ module MAIN_SNES (
       .PORT_DO(JOY1_DO_t),
 
       .JOYSTICK1(joy_swap ? joy1 : joy0),
-      .JOY_X(p1_lstick_x),
-      .JOY_Y(p1_lstick_y),
+      .JOY_X(8'd128),
+      .JOY_Y(8'd128),
 
-      .DPAD_AIM_SPEED(dpad_aim_speed),
-      .MOUSE_EN(mouse_enabled)
+      .DPAD_AIM_SPEED(8'd0),
+      .MOUSE_EN(1'b0)
   );
 
   wire [1:0] JOY2_DO;
@@ -854,41 +843,6 @@ module MAIN_SNES (
       // .MOUSE_EN(mouse_mode[1])
   );
 
-  wire LG_P6_out;
-  wire [1:0] LG_DO;
-  wire [2:0] LG_TARGET;
-
-  lightgun lightgun (
-      .CLK  (clk_sys),
-      .RESET(reset),
-
-      .JOY_X(p1_lstick_x),
-      .JOY_Y(p1_lstick_y),
-
-      .F(p1_button_a),
-      .C(p1_button_b),
-      .T(p1_button_x),
-      .P(p1_button_y),
-
-      .UP(p1_dpad_up),
-      .DOWN(p1_dpad_down),
-      .LEFT(p1_dpad_left),
-      .RIGHT(p1_dpad_right),
-      .DPAD_AIM_SPEED(dpad_aim_speed),
-
-      .HDE(hblank_n),
-      .VDE(vblank_n),
-      .CLKPIX(dotclk),
-
-      .TARGET(LG_TARGET),
-      .SIZE(0),
-      .GUN_TYPE(lightgun_type),
-
-      .PORT_LATCH(JOY_STRB),
-      .PORT_CLK(JOY2_CLK),
-      .PORT_P6(LG_P6_out),
-      .PORT_DO(LG_DO)
-  );
 
   // 1 [oooo|ooo) 7 - 1:+5V  2:Clk  3:Strobe   4:D0  5:D1  6: I/O  7:Gnd
 
@@ -933,7 +887,7 @@ module MAIN_SNES (
       USER_OUT[4] = joy_swap ? JOY2_P6 : snac_p2 ? JOY2_P6 : JOY1_P6;
       JOY1_DI = joy_swap ? datajoy0_DI : snac_p2 ? {1'b1, USER_IN[5]} : {USER_IN[2], USER_IN[5]};
       JOY2_DI = joy_swap ? {USER_IN[2], USER_IN[5]} : datajoy1_DI;
-      JOY2_P6_DI = joy_swap ? USER_IN[4] : snac_p2 ? USER_IN[4] : (LG_P6_out | !GUN_MODE);
+      JOY2_P6_DI = joy_swap ? USER_IN[4] : snac_p2 ? USER_IN[4] : 1'b1;
     end else begin
       USER_OUT[0] = 1'b1;
       USER_OUT[1] = 1'b1;
@@ -941,7 +895,7 @@ module MAIN_SNES (
       USER_OUT[4] = 1'b1;
       JOY1_DI = JOY1_DO;
       JOY2_DI = JOY2_DO;
-      JOY2_P6_DI = (LG_P6_out | !GUN_MODE);
+      JOY2_P6_DI = 1'b1;
     end
   end
 
