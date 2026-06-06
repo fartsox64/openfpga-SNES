@@ -17,5 +17,18 @@
     "platforms": {
         "pocket": "1.3.0"
     },
-    "modules": {}
+    "modules": {},
+    "release": {
+        "folders": {
+            "stage_folder": "staging",
+            "release_folder": "release",
+            "pkg_folder": "pkg",
+            "output_folder": "projects/output_files"
+        },
+        "target": {
+            "pocket": {
+                "release_file": "{author}.{core}_{version}"
+            }
+        }
+    }
 }
