@@ -127,12 +127,12 @@ module save_state_controller (
       .aclr    (fifo_load_clr)
   );
   defparam fifo_load.intended_device_family = "Cyclone V",
-           fifo_load.lpm_numwords           = 4,
+           fifo_load.lpm_numwords           = 8,
            fifo_load.lpm_showahead          = "OFF",
            fifo_load.lpm_type               = "dcfifo_mixed_widths",
            fifo_load.lpm_width              = 32,
-           fifo_load.lpm_widthu             = 2,
-           fifo_load.lpm_widthu_r           = 1,
+           fifo_load.lpm_widthu             = 3,
+           fifo_load.lpm_widthu_r           = 2,
            fifo_load.lpm_width_r            = 64,
            fifo_load.overflow_checking      = "OFF",
            fifo_load.rdsync_delaypipe       = 5,
