@@ -813,12 +813,7 @@ module MAIN_SNES (
       .PORT_P6(JOY1_P6),
       .PORT_DO(JOY1_DO_t),
 
-      .JOYSTICK1(joy_swap ? joy1 : joy0),
-      .JOY_X(8'd128),
-      .JOY_Y(8'd128),
-
-      .DPAD_AIM_SPEED(8'd0),
-      .MOUSE_EN(1'b0)
+      .JOYSTICK1(joy_swap ? joy1 : joy0)
   );
 
   wire [1:0] JOY2_DO;

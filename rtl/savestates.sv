@@ -42,8 +42,8 @@ module savestates
 	input             ddr_ack,
 	output     [21:3] ddr_addr,
 	output reg        ddr_we,
-	output reg  [7:0] ddr_be,
 	output reg        ddr_req,
+	output     [ 7:0] ddr_be,
 
 	output            aram_sel,
 	output            dsp_regs_sel,
@@ -112,14 +112,11 @@ reg save_en;
 reg load_en;
 reg rd_rti;
 reg save_end;
+reg [2:0] ddr_state;
 
 wire nmi_vect = ({ca[23:1],1'b0} == 24'h00FFEA);
 wire nmi_vect_l = nmi_vect & ~ca[0];
 wire nmi_vect_h = nmi_vect &  ca[0];
-
-wire irq_vect = ({ca[23:1],1'b0} == 24'h00FFEE);
-wire irq_vect_l = irq_vect & ~ca[0];
-wire irq_vect_h = irq_vect &  ca[0];
 
 wire ss_reg_sel = (ca[23:16] == 8'hC0);
 
@@ -153,19 +150,12 @@ wire bsram_read = bsram_sel & ~pard_n;
 
 wire dspn_ram_read = dspn_ram_sel & ~pard_n;
 
-reg [3:0] ddr_state;
 reg [7:0] ddr_data;
-reg load_ready;
 
 wire ddr_busy = ddr_req != ddr_ack;
 
-localparam DDR_IDLE = 4'd0, LOAD_DATA = 4'd1, WRITE_DATA = 4'd2,
-			WRITE_CNTSIZE = 4'd3, READ_HEAD = 4'd4,	READ_HEAD_END = 4'd5,
-			DDR_END = 4'd6;
-
-// Always prefer NMI vector for triggering save state
-wire ss_use_nmi = 1'b1;
-
+localparam DDR_IDLE = 3'd0, LOAD_DATA = 3'd1, WRITE_DATA = 3'd2,
+			WRITE_CNTSIZE = 3'd3, DDR_END = 3'd4;
 
 always @(posedge clk) begin
 	if (~reset_n) begin
@@ -173,7 +163,7 @@ always @(posedge clk) begin
 		save_en <= 0;
 		load_en <= 0;
 		save_end <= 0;
-		load_ready <= 0;
+
 		rd_rti <= 0;
 		ss_data_addr <= 0;
 		ss_data_addr_inc <= 0;
@@ -188,14 +178,12 @@ always @(posedge clk) begin
 			end else if (~load_old & load) begin
 				load_en <= 1;
 				ss_slot <= slot;
-				ddr_state <= READ_HEAD; // Check header in RAM
-				load_ready <= 0;
 			end
 		end
 
 		if (cpurd_ce) begin
-			if (nmi_vect_l | (~ss_use_nmi & irq_vect_l)) begin // Prefer to use NMI
-				if (~ss_busy & (save_en | (load_en & load_ready))) begin
+			if (nmi_vect_l) begin
+				if (~ss_busy & (save_en | load_en)) begin
 					ss_busy <= 1; // Override NMI/IRQ vector
 				end
 			end
@@ -284,7 +272,6 @@ always @(posedge clk) begin
 		end
 
 		ddr_we <= 0;
-		ddr_be <= 8'hFF;
 
 		if (ddr_req == ddr_ack) begin
 			case(ddr_state)
@@ -306,20 +293,6 @@ always @(posedge clk) begin
 					ddr_req <= ~ddr_req;
 					ddr_state <= DDR_END;
 				end
-				READ_HEAD: begin
-					ss_ddr_addr <= 20'd8;
-					ddr_req <= ~ddr_req;
-					ddr_state <= READ_HEAD_END;
-				end
-				READ_HEAD_END: begin
-					ddr_state <= DDR_END;
-					if (ddr_di[31:0] == 32'h5345_4E53) begin // "SNES"
-						load_ready <= 1; // State found
-					end else begin
-						load_en <= 0;
-					end
-				end
-
 				DDR_END: begin
 					ddr_state <= DDR_IDLE;
 				end
@@ -412,7 +385,7 @@ savestates_map ss_map
 );
 
 
-wire ss_oe = ss_data_sel | ss_status_sel | nmi_vect | irq_vect |
+wire ss_oe = ss_data_sel | ss_status_sel | nmi_vect |
 			ss_ramsize_sel | ss_romtype_sel | ssr_oe | map_ss_oe |
 			ppu_sel | dspn_regs_sel | gsu_regs_sel;
 
@@ -420,8 +393,8 @@ always @(posedge clk) begin
 	ss_do <= 8'h00;
 	if (ss_data_sel) ss_do <= ddr_di[ss_data_addr[2:0]*8 +:8];
 	if (ss_status_sel) ss_do <= { 6'd0, ddr_busy, save_en };
-	if (nmi_vect_l | irq_vect_l) ss_do <= nmi_vect_addr[7:0];
-	if (nmi_vect_h | irq_vect_h) ss_do <= nmi_vect_addr[15:8];
+	if (nmi_vect_l) ss_do <= nmi_vect_addr[7:0];
+	if (nmi_vect_h) ss_do <= nmi_vect_addr[15:8];
 	if (ss_ramsize_sel) ss_do <= { 4'd0, ram_size };
 	if (ss_romtype_sel) ss_do <= rom_type;
 	if (ssr_oe) ss_do <= ssr_do;
@@ -447,6 +420,8 @@ always @(*) begin
 	if (bsram_read) ddr_data = bsram_di;
 	if (dspn_ram_read) ddr_data = dspn_di;
 end
+
+assign ddr_be = 8'hFF;
 
 assign ss_do_ovr = ss_busy & ss_oe;
 assign ss_rom_ovr = map_active ? map_rom_ovr : ss_busy;
