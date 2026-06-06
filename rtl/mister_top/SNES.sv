@@ -95,6 +95,25 @@ module MAIN_SNES (
 
     output reg [3:0] sram_size,
 
+    // savestate.bin ROM loading into SDRAM at 0xFF0000
+    input wire        ssbin_download,
+    input wire        ssbin_wr,
+    input wire [16:0] ssbin_addr,
+    input wire [15:0] ssbin_dout,
+
+    // Save States
+    input  wire        ss_save,
+    input  wire        ss_load,
+    output wire        ss_busy,
+
+    input  wire [63:0] ss_ddr_di,
+    input  wire        ss_ddr_ack,
+    output wire [63:0] ss_ddr_do,
+    output wire [21:3] ss_ddr_addr,
+    output wire        ss_ddr_we,
+    output wire [ 7:0] ss_ddr_be,
+    output wire        ss_ddr_req,
+
     // SDRAM
     output wire [12:0] dram_a,
     output wire [ 1:0] dram_ba,
@@ -422,6 +441,21 @@ module MAIN_SNES (
       .DBG_CPU_EN(1'b1),
 `endif
 
+      // Save States
+      .SS_SAVE(ss_save),
+      .SS_TOSD(1'b1),
+      .SS_LOAD(ss_load),
+      .SS_SLOT(2'b00),
+      .SS_RAM_SIZE(ram_size),
+      .SS_BUSY(ss_busy),
+      .SS_DDR_DI(ss_ddr_di),
+      .SS_DDR_ACK(ss_ddr_ack),
+      .SS_DDR_DO(ss_ddr_do),
+      .SS_DDR_ADDR(ss_ddr_addr),
+      .SS_DDR_WE(ss_ddr_we),
+      .SS_DDR_BE(ss_ddr_be),
+      .SS_DDR_REQ(ss_ddr_req),
+
       // MSU register handling
       // .MSU_TRACK_NUM(msu_track_num),
       // .MSU_TRACK_REQUEST(msu_track_request),
@@ -442,7 +476,7 @@ module MAIN_SNES (
       .AUDIO_R(audio_r)
   );
 
-  wire reset = core_reset | cart_download | spc_download | bk_loading | clearing_ram | msu_data_download | parser_delay != 0;
+  wire reset = core_reset | cart_download | spc_download | bk_loading | clearing_ram | msu_data_download | ssbin_download | parser_delay != 0;
 
   reg RESET_N = 0;
   reg RFSH = 0;
@@ -508,16 +542,24 @@ module MAIN_SNES (
   wire [15:0] ROM_D;
   wire [15:0] ROM_Q;
 
+  // ssbin is loaded at SDRAM byte offset 0xFF8000.
+  // savestates.sv maps cpu_addr[23:16]=0xFF via {0xFF, ca[16], ca[14:0]},
+  // which collapses both halves of bank $FF to the same $8000–$FFFF window.
+  wire [24:0] ssbin_sdram_addr = 25'h0FF8000 + {8'h0, ssbin_addr};
+
   sdram sdram (
       .init(0),  //~clock_locked),
       .clk(clk_mem),
 
-      .addr(cart_download ? ioctl_addr : ROM_ADDR),
-      .din (cart_download ? ioctl_dout : ROM_D),
+      .addr(ssbin_download ? ssbin_sdram_addr :
+            cart_download  ? ioctl_addr       : ROM_ADDR),
+      .din (ssbin_download ? ssbin_dout       :
+            cart_download  ? ioctl_dout       : ROM_D),
       .dout(ROM_Q),
-      .rd  (~cart_download & (RESET_N ? ~ROM_OE_N : RFSH)),
-      .wr  (cart_download ? ioctl_wr : ~ROM_WE_N),
-      .word(cart_download | ROM_WORD),
+      .rd  (~cart_download & ~ssbin_download & (RESET_N ? ~ROM_OE_N : RFSH)),
+      .wr  (ssbin_download ? ssbin_wr  :
+            cart_download  ? ioctl_wr  : ~ROM_WE_N),
+      .word(ssbin_download | cart_download | ROM_WORD),
       .busy(),
 
       // Actual SDRAM interface

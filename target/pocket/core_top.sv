@@ -326,6 +326,10 @@ module core_top (
     if (bridge_addr[31:28] == 4'h2) begin
       bridge_rd_data <= sd_read_data;
     end
+
+    if (bridge_addr[31:28] == 4'h4) begin
+      bridge_rd_data <= save_state_bridge_read_data;
+    end
   end
 
   always @(posedge clk_74a) begin
@@ -408,10 +412,10 @@ module core_top (
 
   wire dataslot_allcomplete;
 
-  wire savestate_supported = 0;
-  wire [31:0] savestate_addr;
-  wire [31:0] savestate_size;
-  wire [31:0] savestate_maxloadsize;
+  wire savestate_supported = ssbin_ready;
+  wire [31:0] savestate_addr = 32'h40000000;
+  wire [31:0] savestate_size = 32'h0;
+  wire [31:0] savestate_maxloadsize = 32'h00080000; // 512KB
 
   wire savestate_start;
   wire savestate_start_ack;
@@ -424,6 +428,59 @@ module core_top (
   wire savestate_load_busy;
   wire savestate_load_ok;
   wire savestate_load_err;
+
+  // Save state data on APF bridge (0x4xxxxxxx range)
+  wire [31:0] save_state_bridge_read_data;
+
+  wire        ss_save;
+  wire        ss_load;
+  wire        ss_busy_s;
+
+  wire [63:0] ss_ddr_do;
+  wire [63:0] ss_ddr_di;
+  wire [21:3] ss_ddr_addr;
+  wire        ss_ddr_we;
+  wire [ 7:0] ss_ddr_be;
+  wire        ss_ddr_req;
+  wire        ss_ddr_ack;
+
+  save_state_controller save_state_ctrl (
+      .clk_74a        (clk_74a),
+      .clk_mem_85_9   (clk_mem_85_9),
+      .clk_ppu_21_47  (clk_sys_21_48),
+
+      .bridge_wr            (bridge_wr),
+      .bridge_rd            (bridge_rd),
+      .bridge_endian_little (bridge_endian_little),
+      .bridge_addr          (bridge_addr),
+      .bridge_wr_data       (bridge_wr_data),
+      .save_state_bridge_read_data(save_state_bridge_read_data),
+
+      .savestate_load     (savestate_load),
+      .savestate_load_ack_s (savestate_load_ack),
+      .savestate_load_busy_s(savestate_load_busy),
+      .savestate_load_ok_s  (savestate_load_ok),
+      .savestate_load_err_s (savestate_load_err),
+
+      .savestate_start      (savestate_start),
+      .savestate_start_ack_s(savestate_start_ack),
+      .savestate_start_busy_s(savestate_start_busy),
+      .savestate_start_ok_s (savestate_start_ok),
+      .savestate_start_err_s(savestate_start_err),
+
+      .ss_save    (ss_save),
+      .ss_load    (ss_load),
+
+      .ss_ddr_do  (ss_ddr_do),
+      .ss_ddr_di  (ss_ddr_di),
+      .ss_ddr_addr(ss_ddr_addr),
+      .ss_ddr_we  (ss_ddr_we),
+      .ss_ddr_be  (ss_ddr_be),
+      .ss_ddr_req (ss_ddr_req),
+      .ss_ddr_ack (ss_ddr_ack),
+
+      .ss_busy    (ss_busy_s)
+  );
 
   wire osnotify_inmenu;
 
@@ -503,16 +560,25 @@ module core_top (
   wire [15:0] ioctl_dout;
 
   reg save_download = 0;
+  reg ssbin_download = 0;
+  reg ssbin_ready = 0;
   reg dataslot_allcomplete_prev;
 
   always @(posedge clk_74a) begin
     dataslot_allcomplete_prev <= dataslot_allcomplete;
 
-    // if (dataslot_requestwrite) ioctl_download <= 1;
-    // else if (dataslot_allcomplete) ioctl_download <= 0;
+    if (dataslot_requestread || (dataslot_requestwrite && dataslot_requestwrite_id != 16'd2))
+      save_download <= 1;
+    else if (dataslot_allcomplete && ~dataslot_allcomplete_prev)
+      save_download <= 0;
 
-    if (dataslot_requestread || dataslot_requestwrite) save_download <= 1;
-    else if (dataslot_allcomplete && ~dataslot_allcomplete_prev) save_download <= 0;
+    // Data slot 2 = savestate.bin ROM
+    if (dataslot_requestwrite && dataslot_requestwrite_id == 16'd2)
+      ssbin_download <= 1;
+    else if (dataslot_allcomplete && ~dataslot_allcomplete_prev) begin
+      if (ssbin_download) ssbin_ready <= 1;
+      ssbin_download <= 0;
+    end
   end
 
   reg [7:0] rom_type;
@@ -564,6 +630,30 @@ module core_top (
       .write_en  (sd_wr),
       .write_addr(sd_buff_addr_in),
       .write_data(sd_buff_dout)
+  );
+
+  // savestate.bin ROM loader (data slot 2) → SDRAM at 0xFF0000
+  wire        ssbin_wr;
+  wire [16:0] ssbin_addr_raw;
+  wire [15:0] ssbin_dout;
+
+  data_loader #(
+      .ADDRESS_MASK_UPPER_4(4'h3),
+      .ADDRESS_SIZE(17),
+      .WRITE_MEM_CLOCK_DELAY(7),
+      .OUTPUT_WORD_SIZE(2)
+  ) ssbin_data_loader (
+      .clk_74a(clk_74a),
+      .clk_memory(clk_sys_21_48),
+
+      .bridge_wr(bridge_wr),
+      .bridge_endian_little(bridge_endian_little),
+      .bridge_addr(bridge_addr),
+      .bridge_wr_data(bridge_wr_data),
+
+      .write_en  (ssbin_wr),
+      .write_addr(ssbin_addr_raw),
+      .write_data(ssbin_dout)
   );
 
   wire [31:0] sd_read_data;
@@ -856,6 +946,25 @@ module core_top (
       .sd_buff_dout(sd_buff_dout),
 
       .sram_size(sram_size),
+
+      // savestate.bin ROM loading
+      .ssbin_download(ssbin_download),
+      .ssbin_wr(ssbin_wr),
+      .ssbin_addr(ssbin_addr_raw),
+      .ssbin_dout(ssbin_dout),
+
+      // Save States
+      .ss_save(ss_save),
+      .ss_load(ss_load),
+      .ss_busy(ss_busy_s),
+
+      .ss_ddr_di  (ss_ddr_di),
+      .ss_ddr_ack (ss_ddr_ack),
+      .ss_ddr_do  (ss_ddr_do),
+      .ss_ddr_addr(ss_ddr_addr),
+      .ss_ddr_we  (ss_ddr_we),
+      .ss_ddr_be  (ss_ddr_be),
+      .ss_ddr_req (ss_ddr_req),
 
       // SDRAM
       .dram_a(dram_a),

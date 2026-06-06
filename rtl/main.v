@@ -117,7 +117,23 @@ module main #(
     input         MSU_ENABLE,
 
     output [15:0] AUDIO_L,
-    output [15:0] AUDIO_R
+    output [15:0] AUDIO_R,
+
+    // Save States
+    input             SS_SAVE,
+    input             SS_TOSD,
+    input             SS_LOAD,
+    input       [1:0] SS_SLOT,
+    input       [3:0] SS_RAM_SIZE,
+    output            SS_BUSY,
+
+    input      [63:0] SS_DDR_DI,
+    input             SS_DDR_ACK,
+    output     [63:0] SS_DDR_DO,
+    output     [21:3] SS_DDR_ADDR,
+    output            SS_DDR_WE,
+    output      [7:0] SS_DDR_BE,
+    output            SS_DDR_REQ
 );
 
   parameter USE_DLH = 1'b1;
@@ -183,11 +199,11 @@ module main #(
       .vram_wra_n(VRAM1_WE_N),
       .vram_wrb_n(VRAM2_WE_N),
 
-      .aram_addr(ARAM_ADDR),
+      .aram_addr(snes_aram_addr),
       .aram_d(ARAM_D),
       .aram_q(ARAM_Q),
-      .aram_ce_n(ARAM_CE_N),
-      .aram_oe_n(ARAM_OE_N),
+      .aram_ce_n(snes_aram_ce_n),
+      .aram_oe_n(snes_aram_oe_n),
       .aram_we_n(ARAM_WE_N),
 
       .joy1_di(JOY1_DI),
@@ -838,6 +854,130 @@ module main #(
     endcase
 
     if (MSU_SEL) DI = MSU_DO;
+
+    if (SS_DO_OVR) DI = SS_DO;
+
+    if (SS_ROM_OVR) begin
+      ROM_ADDR = SS_ROM_ADDR;
+      ROM_CE_N = 0;
+      ROM_OE_N = 0;
+      ROM_WE_N = 1;
+      ROM_WORD = 0;
+    end
   end
+
+  // ARAM address/control mux: save state overrides SMP during ARAM serialization
+  wire [15:0] snes_aram_addr;
+  wire        snes_aram_ce_n;
+  wire        snes_aram_oe_n;
+
+  assign ARAM_ADDR = SS_ARAM_SEL ? SS_EXT_ADDR[15:0] : snes_aram_addr;
+  assign ARAM_CE_N = SS_ARAM_SEL ? 1'b0              : snes_aram_ce_n;
+  assign ARAM_OE_N = SS_ARAM_SEL ? 1'b0              : snes_aram_oe_n;
+
+  // Save state ROM address and data signals
+  wire [23:0] SS_ROM_ADDR;
+  wire  [7:0] SS_DO;
+  wire        SS_DO_OVR;
+  wire        SS_ROM_OVR;
+  wire [19:0] SS_EXT_ADDR;
+
+  // SPC/ARAM data for save states - ARAM_Q when aram selected, 0 otherwise
+  wire SS_ARAM_SEL;
+  wire SS_DSP_REGS_SEL;
+  wire SS_SMP_SEL;
+  wire SS_BSRAM_SEL;
+  wire SS_DSPN_REGS_SEL;
+  wire SS_DSPN_RAM_SEL;
+  wire SS_GSU_SEL;
+
+  // spc_di: ARAM data when aram_sel; DSP/SMP registers not yet exposed
+  wire [7:0] SS_SPC_DI = ARAM_Q;
+
+  // ppu_di: PPU shadow registers not yet exposed from SNES.vhd
+  wire [7:0] SS_PPU_DI = 8'h00;
+
+  // DSPn/GSU stubs
+  wire [7:0] SS_DSPN_DI = 8'h00;
+  wire [7:0] SS_GSU_DI  = 8'h00;
+
+  // SA1 CPU bus stubs (SA1 save state requires SA1Map to expose its 65816 bus)
+  wire [23:0] SS_SA1_A   = 24'h0;
+  wire  [7:0] SS_SA1_DI  = 8'h0;
+  wire        SS_SA1_RD_N = 1'b1;
+  wire        SS_SA1_WR_N = 1'b1;
+  wire        SS_SA1_ROMSEL = 1'b0;
+  wire        SS_SNS_ROMSEL = 1'b0;
+
+  savestates ss (
+    .reset_n(RESET_N),
+    .clk(MCLK),
+
+    .save(SS_SAVE),
+    .save_sd(SS_TOSD),
+    .load(SS_LOAD),
+    .slot(SS_SLOT),
+
+    .ram_size(SS_RAM_SIZE),
+    .rom_type(ROM_TYPE),
+
+    .sysclkf_ce(SYSCLKF_CE),
+    .sysclkr_ce(SYSCLKR_CE),
+
+    .romsel_n(ROMSEL_N),
+    .rom_q(ROM_Q),
+
+    .ca(CA),
+    .cpurd_n(CPURD_N),
+    .cpuwr_n(CPUWR_N),
+
+    .pa(PA),
+    .pard_n(PARD_N),
+    .pawr_n(PAWR_N),
+
+    .di(DO),
+    .ss_do(SS_DO),
+
+    .rom_addr(SS_ROM_ADDR),
+
+    .ddr_di(SS_DDR_DI),
+    .ddr_ack(SS_DDR_ACK),
+    .ddr_do(SS_DDR_DO),
+    .ddr_addr(SS_DDR_ADDR),
+    .ddr_we(SS_DDR_WE),
+    .ddr_be(SS_DDR_BE),
+    .ddr_req(SS_DDR_REQ),
+
+    .ext_addr(SS_EXT_ADDR),
+
+    .spc_di(SS_SPC_DI),
+    .aram_sel(SS_ARAM_SEL),
+    .dsp_regs_sel(SS_DSP_REGS_SEL),
+    .smp_regs_sel(SS_SMP_SEL),
+
+    .ppu_di(SS_PPU_DI),
+
+    .bsram_sel(SS_BSRAM_SEL),
+    .bsram_di(BSRAM_Q),
+
+    .dspn_regs_sel(SS_DSPN_REGS_SEL),
+    .dspn_ram_sel(SS_DSPN_RAM_SEL),
+    .dspn_di(SS_DSPN_DI),
+
+    .gsu_regs_sel(SS_GSU_SEL),
+    .gsu_di(SS_GSU_DI),
+
+    .sa1_active(MAP_ACTIVE[3]),
+    .sa1_a(SS_SA1_A),
+    .sa1_di(SS_SA1_DI),
+    .sa1_rd_n(SS_SA1_RD_N),
+    .sa1_wr_n(SS_SA1_WR_N),
+    .sa1_sa1_romsel(SS_SA1_ROMSEL),
+    .sa1_sns_romsel(SS_SNS_ROMSEL),
+
+    .ss_do_ovr(SS_DO_OVR),
+    .ss_rom_ovr(SS_ROM_OVR),
+    .ss_busy(SS_BUSY)
+  );
 
 endmodule
