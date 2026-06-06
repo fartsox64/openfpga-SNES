@@ -1,15 +1,14 @@
-// Save state controller bridging APF (74a clock domain) and
-// the savestates module (21.47MHz PPU clock domain).
+// Save state controller - bridges APF (74a) and savestates module (21.47MHz).
 //
-// The savestates module uses a DDR-style toggle handshake:
-//   ss_ddr_req is toggled to start a transfer
-//   ss_ddr_ack mirrors ss_ddr_req when the transfer is complete
-//   ss_ddr_busy = (ss_ddr_req != ss_ddr_ack)
+// SAVE (core→APF): register-based — no FIFO needed.
+//   APF at 74.25MHz reads ~20x faster than the SNES produces data.
+//   Each 64-bit chunk is latched into save_buf_21 (21.47 domain) and
+//   mirrored to save_buf_74a (74a domain) via a 2-stage toggle synchroniser.
+//   The core is acked 3 cycles after the latch (data is stable in 74a by then).
 //
-// For save (core→host): savestates writes ss_ddr_do and sets ss_ddr_we=1.
-// For load (host→core): savestates reads ss_ddr_di and sets ss_ddr_we=0.
-//
-// Data flows through FIFOs that cross the clock domain boundary.
+// LOAD (APF→core): 4-entry DCFIFO.
+//   APF pre-loads data into the FIFO, then signals savestate_load.
+//   Core reads chunks as the savestates ROM requests them.
 module save_state_controller (
     input wire clk_74a,
     input wire clk_mem_85_9,
@@ -23,7 +22,7 @@ module save_state_controller (
     input wire [31:0] bridge_wr_data,
     output wire [31:0] save_state_bridge_read_data,
 
-    // APF save state handshake (74a domain)
+    // APF save state handshake
     input  wire savestate_load,
     output wire savestate_load_ack_s,
     output wire savestate_load_busy_s,
@@ -36,85 +35,104 @@ module save_state_controller (
     output wire savestate_start_ok_s,
     output wire savestate_start_err_s,
 
-    // Control signals to savestates module (21.47MHz domain)
+    // Triggers to savestates module
     output reg ss_save,
     output reg ss_load,
 
-    // DDR-toggle interface to savestates module (21.47MHz domain)
-    input  wire [63:0] ss_ddr_do,   // data from core being saved
-    output wire [63:0] ss_ddr_di,   // data to core being loaded
-    input  wire [21:3] ss_ddr_addr, // address (slot-encoded, informational)
-    input  wire        ss_ddr_we,   // 1=write(save), 0=read(load)
-    input  wire [ 7:0] ss_ddr_be,   // byte enables (informational)
-    input  wire        ss_ddr_req,  // toggled when transfer requested
-    output reg         ss_ddr_ack,  // mirrors ss_ddr_req when transfer done
+    // DDR-toggle interface (21.47 domain)
+    input  wire [63:0] ss_ddr_do,   // data from core (save)
+    output wire [63:0] ss_ddr_di,   // data to core (load)
+    input  wire [21:3] ss_ddr_addr,
+    input  wire        ss_ddr_we,
+    input  wire [ 7:0] ss_ddr_be,
+    input  wire        ss_ddr_req,  // toggled to request transfer
+    output reg         ss_ddr_ack,  // mirrors ss_ddr_req when done
 
-    input  wire        ss_busy      // save state operation in progress
+    input  wire        ss_busy
 );
 
-  // ---------------------------------------------------------------------------
-  // Clock-domain crossing: APF ↔ core
-  // ---------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // APF status CDC: 21.47 <-> 74a
+  // -------------------------------------------------------------------------
   wire savestate_load_s;
   wire savestate_start_s;
 
-  synch_3 #(.WIDTH(2)) savestate_in (
-      {savestate_load,  savestate_start},
+  synch_3 #(.WIDTH(2)) ss_apf_in (
+      {savestate_load, savestate_start},
       {savestate_load_s, savestate_start_s},
       clk_ppu_21_47
   );
 
-  reg savestate_load_ack;
-  reg savestate_load_busy;
-  reg savestate_load_ok;
-  reg savestate_load_err;
+  reg ss_load_ack,  ss_load_busy,  ss_load_ok,  ss_load_err;
+  reg ss_start_ack, ss_start_busy, ss_start_ok, ss_start_err;
 
-  reg savestate_start_ack;
-  reg savestate_start_busy;
-  reg savestate_start_ok;
-  reg savestate_start_err;
-
-  synch_3 #(.WIDTH(8)) savestate_out (
-      {savestate_load_ack,  savestate_load_busy,  savestate_load_ok,  savestate_load_err,
-       savestate_start_ack, savestate_start_busy, savestate_start_ok, savestate_start_err},
-      {savestate_load_ack_s, savestate_load_busy_s, savestate_load_ok_s, savestate_load_err_s,
-       savestate_start_ack_s, savestate_start_busy_s, savestate_start_ok_s, savestate_start_err_s},
+  synch_3 #(.WIDTH(8)) ss_apf_out (
+      {ss_load_ack,  ss_load_busy,  ss_load_ok,  ss_load_err,
+       ss_start_ack, ss_start_busy, ss_start_ok, ss_start_err},
+      {savestate_load_ack_s,  savestate_load_busy_s,
+       savestate_load_ok_s,   savestate_load_err_s,
+       savestate_start_ack_s, savestate_start_busy_s,
+       savestate_start_ok_s,  savestate_start_err_s},
       clk_74a
   );
 
-  // ---------------------------------------------------------------------------
-  // Load FIFO: host→core (32-bit wide write from 74a, 64-bit wide read in 21.47)
-  // ---------------------------------------------------------------------------
-  wire fifo_load_empty;
-  reg  fifo_load_read_req;
-  wire [63:0] fifo_load_dout;
-  reg  fifo_load_clr;
+  // -------------------------------------------------------------------------
+  // SAVE path: 21.47 → 74a via toggle register
+  // -------------------------------------------------------------------------
 
-  // Byte-swap 32-bit words into 64-bit little-endian order
+  // 21.47 domain: latched save data + toggle signal
+  reg [63:0] save_buf_21;
+  reg        save_tog_21;
+
+  // Synchronise toggle into 74a domain, then latch data
+  reg save_tog_74_r1, save_tog_74_r2, save_tog_74_prev;
+  reg [63:0] save_buf_74;
+
+  always @(posedge clk_74a) begin
+    save_tog_74_r1   <= save_tog_21;
+    save_tog_74_r2   <= save_tog_74_r1;
+    save_tog_74_prev <= save_tog_74_r2;
+    if (save_tog_74_r2 != save_tog_74_prev)
+      save_buf_74 <= save_buf_21;   // sample after toggle stable
+  end
+
+  // Bridge read: bit 2 of address selects upper or lower 32 bits
+  assign save_state_bridge_read_data =
+      bridge_addr[2] ? save_buf_74[63:32] : save_buf_74[31:0];
+
+  // -------------------------------------------------------------------------
+  // LOAD path: APF → 4-entry DCFIFO → core
+  // -------------------------------------------------------------------------
+  wire        fifo_load_empty;
+  reg         fifo_load_rdreq;
+  wire [63:0] fifo_load_q;
+  reg         fifo_load_clr;
+
+  // Byte-swap: APF writes big-endian 32-bit words; reassemble to 64-bit LE
   assign ss_ddr_di = {
-    fifo_load_dout[39:32], fifo_load_dout[47:40],
-    fifo_load_dout[55:48], fifo_load_dout[63:56],
-    fifo_load_dout[ 7: 0], fifo_load_dout[15: 8],
-    fifo_load_dout[23:16], fifo_load_dout[31:24]
+    fifo_load_q[39:32], fifo_load_q[47:40],
+    fifo_load_q[55:48], fifo_load_q[63:56],
+    fifo_load_q[ 7: 0], fifo_load_q[15: 8],
+    fifo_load_q[23:16], fifo_load_q[31:24]
   };
 
   dcfifo_mixed_widths fifo_load (
       .data    (bridge_wr_data),
       .rdclk   (clk_ppu_21_47),
-      .rdreq   (fifo_load_read_req),
+      .rdreq   (fifo_load_rdreq),
       .wrclk   (clk_74a),
       .wrreq   (bridge_wr && bridge_addr[31:28] == 4'h4),
-      .q       (fifo_load_dout),
+      .q       (fifo_load_q),
       .rdempty (fifo_load_empty),
       .aclr    (fifo_load_clr)
   );
   defparam fifo_load.intended_device_family = "Cyclone V",
-           fifo_load.lpm_numwords           = 256,
+           fifo_load.lpm_numwords           = 4,
            fifo_load.lpm_showahead          = "OFF",
            fifo_load.lpm_type               = "dcfifo_mixed_widths",
            fifo_load.lpm_width              = 32,
-           fifo_load.lpm_widthu             = 8,
-           fifo_load.lpm_widthu_r           = 7,
+           fifo_load.lpm_widthu             = 2,
+           fifo_load.lpm_widthu_r           = 1,
            fifo_load.lpm_width_r            = 64,
            fifo_load.overflow_checking      = "OFF",
            fifo_load.rdsync_delaypipe       = 5,
@@ -123,227 +141,133 @@ module save_state_controller (
            fifo_load.wrsync_delaypipe       = 5,
            fifo_load.write_aclr_synch       = "ON";
 
-  // ---------------------------------------------------------------------------
-  // Save FIFO: core→host (64-bit wide write from 21.47, 32-bit wide read in 74a)
-  // ---------------------------------------------------------------------------
-  reg  fifo_save_write_req;
-  reg  fifo_save_read_req;
-  wire fifo_save_rd_empty;
-  wire fifo_save_wr_empty;
+  // -------------------------------------------------------------------------
+  // 21.47 domain state machine
+  // -------------------------------------------------------------------------
+  localparam IDLE         = 3'd0;
+  localparam SAVE_BUSY    = 3'd1;
+  localparam SAVE_WAIT    = 3'd2;
+  localparam LOAD_STREAM  = 3'd3;
+  localparam LOAD_DONE    = 3'd4;
 
-  dcfifo_mixed_widths fifo_save (
-      .data    (ss_ddr_do),
-      .rdclk   (clk_74a),
-      .rdreq   (fifo_save_read_req),
-      .wrclk   (clk_ppu_21_47),
-      .wrreq   (fifo_save_write_req),
-      .q       ({save_state_bridge_read_data[7:0],
-                 save_state_bridge_read_data[15:8],
-                 save_state_bridge_read_data[23:16],
-                 save_state_bridge_read_data[31:24]}),
-      .rdempty (fifo_save_rd_empty),
-      .wrempty (fifo_save_wr_empty),
-      .aclr    (1'b0)
-  );
-  defparam fifo_save.intended_device_family = "Cyclone V",
-           fifo_save.lpm_numwords           = 4,
-           fifo_save.lpm_showahead          = "OFF",
-           fifo_save.lpm_type               = "dcfifo_mixed_widths",
-           fifo_save.lpm_width              = 64,
-           fifo_save.lpm_widthu             = 2,
-           fifo_save.lpm_widthu_r           = 3,
-           fifo_save.lpm_width_r            = 32,
-           fifo_save.overflow_checking      = "ON",
-           fifo_save.rdsync_delaypipe       = 5,
-           fifo_save.underflow_checking     = "ON",
-           fifo_save.use_eab                = "ON",
-           fifo_save.wrsync_delaypipe       = 5;
+  reg [2:0]  state;
+  reg [1:0]  save_ack_delay;    // 3-cycle delay before acking core (CDC settling)
+  reg        save_ack_pending;
 
-  // ---------------------------------------------------------------------------
-  // Bridge read path (74a domain): APF reads saved data via 0x4xxxxxxx
-  // ---------------------------------------------------------------------------
-  reg  [20:0] last_unloader_addr = 21'hFFFFF;
-  reg  [1:0]  save_read_state;
-  reg  prev_bridge_rd;
-
-  wire [27:0] bridge_save_addr = bridge_addr[27:0];
-
-  localparam NONE          = 0;
-  localparam SAVE_READ_REQ = 1;
-
-  always @(posedge clk_74a) begin
-    prev_bridge_rd <= bridge_rd;
-
-    fifo_save_read_req <= 0;
-
-    if (bridge_rd && ~prev_bridge_rd && bridge_addr[31:28] == 4'h4) begin
-      if (~fifo_save_rd_empty && bridge_save_addr[22:2] != last_unloader_addr) begin
-        save_read_state    <= SAVE_READ_REQ;
-        fifo_save_read_req <= 1;
-        last_unloader_addr <= bridge_save_addr[22:2];
-      end
-    end
-
-    case (save_read_state)
-      SAVE_READ_REQ: begin
-        save_read_state    <= NONE;
-        fifo_save_read_req <= 0;
-      end
-      default: ;
-    endcase
-  end
-
-  // ---------------------------------------------------------------------------
-  // Core-side state machine (21.47MHz domain)
-  // ---------------------------------------------------------------------------
-  localparam SAVE_BUSY           = 1;
-  localparam SAVE_WAIT_FIFO_PUSH = 2;
-  localparam SAVE_WAIT_APF_READ  = 3;
-  localparam SAVE_WAIT_REQ       = 4;
-
-  localparam LOAD_WAIT_REQ       = 10;
-  localparam LOAD_READ_FIFO      = 11;
-  localparam LOAD_WAIT_APF_START = 12;
-  localparam LOAD_APF_COMPLETE   = 13;
-
-  reg [7:0] state;
-
-  reg prev_savestate_start;
-  reg prev_savestate_load;
-  reg prev_ss_busy;
-  reg save_state_loading;
-  reg save_state_saving_req;
-
-  // Track prev ddr_req to detect toggle edges
-  reg ss_ddr_req_prev;
-
-  // Pending transfer: latched when edge detected, cleared when acked
-  reg   pending_req;
-  reg   pending_we;
+  reg  prev_start_s, prev_load_s, prev_ss_busy;
+  reg  ddr_req_prev;
+  reg  pending_save, pending_load;
+  reg  save_state_loading, save_state_load_req;
 
   always @(posedge clk_ppu_21_47) begin
-    prev_ss_busy        <= ss_busy;
-    prev_savestate_start<= savestate_start_s;
-    prev_savestate_load <= savestate_load_s;
-    ss_ddr_req_prev     <= ss_ddr_req;
+    prev_start_s  <= savestate_start_s;
+    prev_load_s   <= savestate_load_s;
+    prev_ss_busy  <= ss_busy;
+    ddr_req_prev  <= ss_ddr_req;
 
-    ss_load            <= 0;
-    ss_save            <= 0;
-    fifo_save_write_req<= 0;
-    fifo_load_read_req <= 0;
+    ss_save          <= 0;
+    ss_load          <= 0;
+    fifo_load_rdreq  <= 0;
+    fifo_load_clr    <= 0;
 
-    // Detect toggle edge on ss_ddr_req (new transfer requested)
-    if (ss_ddr_req != ss_ddr_req_prev) begin
-      pending_req <= 1;
-      pending_we  <= ss_ddr_we;
+    // Detect ddr_req edge
+    if (ss_ddr_req != ddr_req_prev) begin
+      if (ss_ddr_we) pending_save <= 1;
+      else           pending_load <= 1;
     end
 
-    // Auto-start load when FIFO has data from APF
+    // Auto-start load when FIFO has data
     if (~fifo_load_empty && ~save_state_loading) begin
       save_state_loading <= 1;
-      state              <= LOAD_WAIT_REQ;
       ss_load            <= 1;
+      state              <= LOAD_STREAM;
     end
 
-    // APF triggers save start
-    if (savestate_start_s && ~prev_savestate_start) begin
-      state               <= SAVE_BUSY;
-      savestate_start_ack <= 1;
-      savestate_start_ok  <= 0;
-      savestate_start_err <= 0;
-      savestate_load_ok   <= 0;
-      savestate_load_err  <= 0;
-      ss_save             <= 1;
+    // APF requests save
+    if (savestate_start_s && ~prev_start_s) begin
+      state        <= SAVE_BUSY;
+      ss_start_ack <= 1;
+      ss_start_ok  <= 0;
+      ss_start_err <= 0;
+      ss_load_ok   <= 0;
+      ss_load_err  <= 0;
+      ss_save      <= 1;
     end
 
-    // APF triggers load start (data already in FIFO)
-    if (savestate_load_s && ~prev_savestate_load) begin
-      save_state_saving_req <= 1;
-      savestate_load_ack    <= 1;
-      savestate_load_ok     <= 0;
-      savestate_load_err    <= 0;
-      savestate_start_ok    <= 0;
-      savestate_start_err   <= 0;
+    // APF acknowledges load complete
+    if (savestate_load_s && ~prev_load_s) begin
+      save_state_load_req <= 1;
+      ss_load_ack         <= 1;
+      ss_load_ok          <= 0;
+      ss_load_err         <= 0;
+      ss_start_ok         <= 0;
+      ss_start_err        <= 0;
+    end
+
+    // 3-cycle ack delay for save path CDC settling
+    if (save_ack_pending) begin
+      if (save_ack_delay == 0) begin
+        ss_ddr_ack       <= ss_ddr_req;
+        save_ack_pending <= 0;
+      end else begin
+        save_ack_delay <= save_ack_delay - 1'b1;
+      end
     end
 
     case (state)
-      // ------------------------------------------------------------------
-      // Saving: core → FIFO → APF
-      // ------------------------------------------------------------------
       SAVE_BUSY: begin
-        savestate_start_ack  <= 0;
-        savestate_start_busy <= 1;
-
-        if (pending_req && pending_we) begin
-          pending_req          <= 0;
-          fifo_save_write_req  <= 1;
-          state                <= SAVE_WAIT_APF_READ;
-          savestate_start_busy <= 0;
-          savestate_start_ok   <= 1;
+        ss_start_ack  <= 0;
+        ss_start_busy <= 1;
+        if (pending_save) begin
+          save_buf_21      <= ss_ddr_do;
+          save_tog_21      <= ~save_tog_21;
+          pending_save     <= 0;
+          save_ack_delay   <= 2'd2;   // 3 cycles total (2 more after this one)
+          save_ack_pending <= 1;
+          ss_start_busy    <= 0;
+          ss_start_ok      <= 1;
+          state            <= SAVE_WAIT;
         end
       end
 
-      SAVE_WAIT_APF_READ: begin
-        // Wait for APF to drain one 32-bit word from FIFO, then ack core
-        if (fifo_save_wr_empty) begin
-          ss_ddr_ack <= ss_ddr_req;   // mirror the toggle to ack
-          state      <= SAVE_WAIT_REQ;
+      SAVE_WAIT: begin
+        if (pending_save && ~save_ack_pending) begin
+          save_buf_21      <= ss_ddr_do;
+          save_tog_21      <= ~save_tog_21;
+          pending_save     <= 0;
+          save_ack_delay   <= 2'd2;
+          save_ack_pending <= 1;
         end
+        if (prev_ss_busy && ~ss_busy)
+          state <= IDLE;
       end
 
-      SAVE_WAIT_REQ: begin
-        if (pending_req && pending_we) begin
-          pending_req         <= 0;
-          fifo_save_write_req <= 1;
-          state               <= SAVE_WAIT_APF_READ;
-        end else if (prev_ss_busy && ~ss_busy) begin
-          // Save complete
-          state <= NONE;
-        end
-      end
-
-      // ------------------------------------------------------------------
-      // Loading: APF → FIFO → core
-      // ------------------------------------------------------------------
-      LOAD_WAIT_REQ: begin
+      LOAD_STREAM: begin
         if (prev_ss_busy && ~ss_busy) begin
-          // Load complete, wait for APF ack
-          state <= LOAD_WAIT_APF_START;
-        end else if (pending_req && ~pending_we && ~fifo_load_empty) begin
-          // Core wants next 8-byte block and FIFO has data
-          pending_req        <= 0;
-          fifo_load_read_req <= 1;
-          state              <= LOAD_READ_FIFO;
-        end
-        // If pending_req is set but FIFO is empty, leave pending_req set.
-        // The state machine will retry next cycle when the APF refills the FIFO.
-      end
-
-      LOAD_READ_FIFO: begin
-        // Data available from FIFO after one cycle; ack the core
-        ss_ddr_ack <= ss_ddr_req;   // mirror the toggle
-        state      <= LOAD_WAIT_REQ;
-      end
-
-      LOAD_WAIT_APF_START: begin
-        if (save_state_saving_req) begin
-          save_state_saving_req <= 0;
-          save_state_loading    <= 0;
-          fifo_load_clr         <= 1;
-          state                 <= LOAD_APF_COMPLETE;
-          savestate_load_ack    <= 0;
-          savestate_load_busy   <= 1;
+          state <= LOAD_DONE;
+        end else if (pending_load && ~fifo_load_empty) begin
+          fifo_load_rdreq <= 1;
+          pending_load    <= 0;
+          ss_ddr_ack      <= ss_ddr_req;
         end
       end
 
-      LOAD_APF_COMPLETE: begin
-        fifo_load_clr       <= 0;
-        savestate_load_busy <= 0;
-        savestate_load_ok   <= 1;
-        state               <= NONE;
+      LOAD_DONE: begin
+        if (save_state_load_req) begin
+          save_state_load_req <= 0;
+          save_state_loading  <= 0;
+          fifo_load_clr       <= 1;
+          ss_load_busy        <= 0;
+          ss_load_ok          <= 1;
+          state               <= IDLE;
+        end
       end
 
-      default: ; // NONE
+      default: begin
+        ss_start_ack  <= 0;
+        ss_start_busy <= 0;
+        ss_load_busy  <= 0;
+      end
     endcase
   end
 
